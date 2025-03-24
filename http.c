@@ -93,6 +93,7 @@ static int send_json_response(struct MHD_Connection *connection, const char *jso
     if (!response)
         return MHD_NO;
     MHD_add_response_header(response, "Content-Type", "application/json");
+    MHD_add_response_header(response, "Access-Control-Allow-Origin", "*");
     MHD_add_response_header(response, "X-Content-Type-Options", "nosniff");
     MHD_add_response_header(response, "X-Frame-Options", "DENY");
     int ret = MHD_queue_response(connection, status_code, response);
@@ -194,7 +195,15 @@ static int handle_posts(struct MHD_Connection *connection, const char *method,
     } else if (strcmp(method, "POST") == 0) {
         ConnectionInfo *con_info = *con_cls;
         if (*upload_data_size != 0) {
-            con_info->post_data = realloc(con_info->post_data, con_info->post_data_size + *upload_data_size + 1);
+            char *new_ptr = realloc(con_info->post_data, con_info->post_data_size + *upload_data_size + 1);
+            if (new_ptr == NULL) {
+                fprintf(stderr, "Memory allocation error in posts handler\n");
+                free(con_info->post_data);
+                con_info->post_data = NULL;
+                con_info->post_data_size = 0;
+                return send_json_response(connection, "{\"error\":\"Server error\"}", MHD_HTTP_INTERNAL_SERVER_ERROR);
+            }
+            con_info->post_data = new_ptr;
             memcpy(con_info->post_data + con_info->post_data_size, upload_data, *upload_data_size);
             con_info->post_data_size += *upload_data_size;
             con_info->post_data[con_info->post_data_size] = '\0';
@@ -202,7 +211,6 @@ static int handle_posts(struct MHD_Connection *connection, const char *method,
             return MHD_YES;
         } else {
             char title[256] = {0}, content[1024] = {0};
-            // 간단한 JSON 파싱; 실제 운영에서는 JSON 라이브러리 사용 권장
             sscanf(con_info->post_data, "{\"title\":\"%255[^\"]\",\"content\":\"%1023[^\"]\"}", title, content);
             free(con_info->post_data);
             con_info->post_data = NULL;
@@ -234,18 +242,35 @@ static int handle_login(struct MHD_Connection *connection, const char *method,
     } else if (strcmp(method, "POST") == 0) {
         ConnectionInfo *con_info = *con_cls;
         if (*upload_data_size != 0) {
-            con_info->post_data = realloc(con_info->post_data, con_info->post_data_size + *upload_data_size + 1);
+            char *new_ptr = realloc(con_info->post_data, con_info->post_data_size + *upload_data_size + 1);
+            if (new_ptr == NULL) {
+                fprintf(stderr, "Memory allocation error in login handler\n");
+                free(con_info->post_data);
+                con_info->post_data = NULL;
+                con_info->post_data_size = 0;
+                return send_json_response(connection, "{\"error\":\"Server error\"}", MHD_HTTP_INTERNAL_SERVER_ERROR);
+            }
+            con_info->post_data = new_ptr;
             memcpy(con_info->post_data + con_info->post_data_size, upload_data, *upload_data_size);
             con_info->post_data_size += *upload_data_size;
             con_info->post_data[con_info->post_data_size] = '\0';
             *upload_data_size = 0;
             return MHD_YES;
         } else {
+            if (con_info->post_data == NULL || con_info->post_data_size == 0) {
+                fprintf(stderr, "No POST data received in login handler\n");
+                return send_json_response(connection, "{\"error\":\"No data provided\"}", MHD_HTTP_BAD_REQUEST);
+            }
+            fprintf(stderr, "Login post data: %s\n", con_info->post_data);
             char username[128] = {0}, password[128] = {0};
-            sscanf(con_info->post_data, "{\"username\":\"%127[^\"]\",\"password\":\"%127[^\"]\"}", username, password);
+            int parsed = sscanf(con_info->post_data, "{\"username\":\"%127[^\"]\",\"password\":\"%127[^\"]\"}", username, password);
             free(con_info->post_data);
             con_info->post_data = NULL;
             con_info->post_data_size = 0;
+            if (parsed != 2) {
+                fprintf(stderr, "Failed to parse login JSON\n");
+                return send_json_response(connection, "{\"error\":\"Invalid login format\"}", MHD_HTTP_BAD_REQUEST);
+            }
             int user_id = db_validate_user(username, password);
             if (user_id > 0) {
                 Session *sess = session_create(user_id);
@@ -254,8 +279,7 @@ static int handle_login(struct MHD_Connection *connection, const char *method,
                          "{\"result\":\"Login successful\",\"session\":\"%s\"}", sess->token);
                 return send_json_response(connection, json_resp, MHD_HTTP_OK);
             } else {
-                const char *json_err = "{\"error\":\"Login failed\"}";
-                return send_json_response(connection, json_err, MHD_HTTP_UNAUTHORIZED);
+                return send_json_response(connection, "{\"error\":\"Login failed\"}", MHD_HTTP_UNAUTHORIZED);
             }
         }
     }
