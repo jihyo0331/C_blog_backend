@@ -1,2 +1,1 @@
-#include errors detected. Please update your includePath. Squiggles are disabled for this translation unit (/home/jihyo/Documents/c_bacend/http.c).C/C++(1696)
-cannot open source file "microhttpd.h"C/
+<html><body><h1>My Blog</h1><h2>New Post</h2><form method='POST' action='/'>Title: <input type='text' name='title'><br>Content: <textarea name='content'></textarea><br><input type='submit' value='Submit'></form><p><a href='/login'>Login</a> | <a href='/upload'>Upload Image</a></p></body></html>
