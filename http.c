@@ -26,7 +26,7 @@ static Session *session_list = NULL;
 typedef struct ConnectionInfo {
     char *post_data;         // 누적 POST 데이터 (JSON 형식)
     size_t post_data_size;   // 누적된 데이터 크기
-    struct MHD_PostProcessor *post_processor; // POST 데이터 처리를 위한 프로세서
+    struct MHD_PostProcessor *post_processor; // Post Processor (로그인 등에서 사용)
 } ConnectionInfo;
 
 // 보안 개선: /dev/urandom을 이용한 토큰 생성
@@ -88,7 +88,7 @@ static void session_cleanup() {
     }
 }
 
-// JSON 응답 전송 함수 (Content-Type: application/json 및 CORS 헤더 포함)
+// JSON 응답 전송 함수 (Content-Type: application/json + CORS)
 static int send_json_response(struct MHD_Connection *connection, const char *json_str, int status_code) {
     struct MHD_Response *response = MHD_create_response_from_buffer(strlen(json_str), (void*)json_str, MHD_RESPMEM_MUST_COPY);
     if (!response)
@@ -118,16 +118,16 @@ static int save_uploaded_file(const char *filename, const char *data, size_t siz
     return 0;
 }
 
-// POST 프로세서 콜백: 전달된 데이터 청크를 누적
-static enum MHD_Result post_iterator(void *coninfo_cls, enum MHD_ValueKind kind,
-                                       const char *key, const char *filename,
-                                       const char *content_type, const char *transfer_encoding,
-                                       const char *data, uint64_t off, size_t size)
+// POST 데이터 누적을 위한 iterate_post 콜백 (로그인 등에서 사용)
+static MHD_Result iterate_post(void *coninfo_cls, enum MHD_ValueKind kind,
+                               const char *key, const char *filename,
+                               const char *content_type, const char *transfer_encoding,
+                               const char *data, uint64_t off, size_t size)
 {
-    ConnectionInfo *con_info = (ConnectionInfo*)coninfo_cls;
+    ConnectionInfo *con_info = (ConnectionInfo *)coninfo_cls;
     if (size > 0) {
         char *new_ptr = realloc(con_info->post_data, con_info->post_data_size + size + 1);
-        if (new_ptr == NULL)
+        if (!new_ptr)
             return MHD_NO;
         con_info->post_data = new_ptr;
         memcpy(con_info->post_data + con_info->post_data_size, data, size);
@@ -167,22 +167,25 @@ static int request_handler(void *cls, struct MHD_Connection *connection,
     
     session_cleanup();
     if (NULL == *con_cls) {
-        ConnectionInfo *con_info = malloc(sizeof(ConnectionInfo));
-        if (con_info == NULL)
-            return MHD_NO;
-        con_info->post_data = NULL;
-        con_info->post_data_size = 0;
-        // POST 요청일 경우, post processor 생성
+        // POST 요청이면 ConnectionInfo 할당 및 post processor 생성
         if (strcmp(method, "POST") == 0) {
-            con_info->post_processor = MHD_create_post_processor(connection, POSTBUFFERSIZE, post_iterator, (void*)con_info);
-            if (con_info->post_processor == NULL) {
+            ConnectionInfo *con_info = malloc(sizeof(ConnectionInfo));
+            if (!con_info)
+                return MHD_NO;
+            con_info->post_data = NULL;
+            con_info->post_data_size = 0;
+            *con_cls = con_info;
+            // 로그인나 파일 업로드 등의 POST 데이터 처리를 위해 post processor 생성
+            struct MHD_PostProcessor *pp = MHD_create_post_processor(connection, POSTBUFFERSIZE, iterate_post, (void *)con_info);
+            if (pp == NULL) {
                 free(con_info);
                 return MHD_NO;
             }
+            // 저장: con_cls will hold ConnectionInfo; post processor pointer can be stored if needed
+            con_info->post_processor = pp;
         } else {
-            con_info->post_processor = NULL;
+            *con_cls = NULL;
         }
-        *con_cls = con_info;
     }
     
     if (strcmp(url, "/posts") == 0)
@@ -199,7 +202,7 @@ static int request_handler(void *cls, struct MHD_Connection *connection,
 
 // --- 게시글 처리 ---
 // GET: 데이터베이스에서 게시글 목록을 JSON 배열로 반환
-// POST: JSON 요청으로 전달된 title과 content를 새 게시글로 추가
+// POST: JSON 요청으로 전달된 title과 content를 새 게시글로 추가 (수동 누적 방식)
 static int handle_posts(struct MHD_Connection *connection, const char *method,
                          const char *upload_data, unsigned long *upload_data_size, void **con_cls)
 {
@@ -221,54 +224,47 @@ static int handle_posts(struct MHD_Connection *connection, const char *method,
         free(posts);
         return send_json_response(connection, json, MHD_HTTP_OK);
     } else if (strcmp(method, "POST") == 0) {
+        // 여기서는 manual accumulation 대신 post processor를 사용하지 않고,
+        // 단순하게 ConnectionInfo에 누적된 데이터를 처리합니다.
         ConnectionInfo *con_info = *con_cls;
-        if (*upload_data_size != 0) {
-            MHD_post_process(con_info->post_processor, upload_data, *upload_data_size);
-            *upload_data_size = 0;
-            return MHD_YES;
-        } else {
-            char title[256] = {0}, content[1024] = {0};
-            int parsed = sscanf(con_info->post_data, "{\"title\":\"%255[^\"]\",\"content\":\"%1023[^\"]\"}", title, content);
-            free(con_info->post_data);
-            con_info->post_data = NULL;
-            con_info->post_data_size = 0;
-            if (parsed != 2) {
-                fprintf(stderr, "Failed to parse posts JSON\n");
-                return send_json_response(connection, "{\"error\":\"Invalid format\"}", MHD_HTTP_BAD_REQUEST);
-            }
-            char date_str[64];
-            time_t now = time(NULL);
-            struct tm *tm_info = localtime(&now);
-            strftime(date_str, sizeof(date_str), "%Y-%m-%d %H:%M:%S", tm_info);
-            if (db_add_post(title, content, date_str) != 0) {
-                const char *json_err = "{\"error\":\"DB Error\"}";
-                return send_json_response(connection, json_err, MHD_HTTP_INTERNAL_SERVER_ERROR);
-            }
-            const char *json_success = "{\"result\":\"Post added\"}";
-            return send_json_response(connection, json_success, MHD_HTTP_OK);
+        if (con_info->post_data == NULL || con_info->post_data_size == 0) {
+            return send_json_response(connection, "{\"error\":\"No data provided\"}", MHD_HTTP_BAD_REQUEST);
         }
+        char title[256] = {0}, content[1024] = {0};
+        sscanf(con_info->post_data, "{\"title\":\"%255[^\"]\",\"content\":\"%1023[^\"]\"}", title, content);
+        free(con_info->post_data);
+        con_info->post_data = NULL;
+        con_info->post_data_size = 0;
+        char date_str[64];
+        time_t now = time(NULL);
+        struct tm *tm_info = localtime(&now);
+        strftime(date_str, sizeof(date_str), "%Y-%m-%d %H:%M:%S", tm_info);
+        if (db_add_post(title, content, date_str) != 0) {
+            return send_json_response(connection, "{\"error\":\"DB Error\"}", MHD_HTTP_INTERNAL_SERVER_ERROR);
+        }
+        return send_json_response(connection, "{\"result\":\"Post added\"}", MHD_HTTP_OK);
     }
     return MHD_YES;
 }
 
 // --- 로그인 처리 ---
-// GET: 단순 JSON 메시지 안내
-// POST: JSON 요청 {"username":"...","password":"..."}를 파싱하여 로그인 처리 후 세션 토큰 반환
+// GET: JSON 메시지 안내
+// POST: post processor를 통해 누적된 JSON 데이터를 파싱하여 로그인 처리 후 세션 토큰 반환
 static int handle_login(struct MHD_Connection *connection, const char *method,
                          const char *upload_data, unsigned long *upload_data_size, void **con_cls)
 {
     if (strcmp(method, "GET") == 0) {
-        const char *json_msg = "{\"message\":\"Please use POST to login\"}";
-        return send_json_response(connection, json_msg, MHD_HTTP_OK);
+        return send_json_response(connection, "{\"message\":\"Please use POST to login\"}", MHD_HTTP_OK);
     } else if (strcmp(method, "POST") == 0) {
         ConnectionInfo *con_info = *con_cls;
+        // post processor will call iterate_post to accumulate data.
+        // When *upload_data_size becomes 0, it means all data has been processed.
         if (*upload_data_size != 0) {
             MHD_post_process(con_info->post_processor, upload_data, *upload_data_size);
             *upload_data_size = 0;
             return MHD_YES;
         } else {
             if (con_info->post_data == NULL || con_info->post_data_size == 0) {
-                fprintf(stderr, "No POST data received in login handler\n");
                 return send_json_response(connection, "{\"error\":\"No data provided\"}", MHD_HTTP_BAD_REQUEST);
             }
             fprintf(stderr, "Login post data: %s\n", con_info->post_data);
@@ -304,15 +300,12 @@ static int handle_upload(struct MHD_Connection *connection, const char *method,
 {
     const char *cookie = MHD_lookup_connection_value(connection, MHD_COOKIE_KIND, "SESSION");
     if (!cookie || !session_validate(cookie)) {
-        const char *json_err = "{\"error\":\"Unauthorized. Please login.\"}";
-        return send_json_response(connection, json_err, MHD_HTTP_FORBIDDEN);
+        return send_json_response(connection, "{\"error\":\"Unauthorized. Please login.\"}", MHD_HTTP_FORBIDDEN);
     }
     if (strcmp(method, "GET") == 0) {
-        const char *json_msg = "{\"message\":\"Use POST to upload file\"}";
-        return send_json_response(connection, json_msg, MHD_HTTP_OK);
+        return send_json_response(connection, "{\"message\":\"Use POST to upload file\"}", MHD_HTTP_OK);
     } else if (strcmp(method, "POST") == 0) {
         if (*upload_data_size != 0) {
-            // 파일 업로드의 경우 POST 데이터는 한 번에 온다고 가정
             char filename[256] = "uploaded_image.jpg"; // 파일명 추출 로직 필요
             char saved_path[512];
             if (save_uploaded_file(filename, upload_data, *upload_data_size, saved_path, sizeof(saved_path)) == 0) {
@@ -322,9 +315,8 @@ static int handle_upload(struct MHD_Connection *connection, const char *method,
                 *upload_data_size = 0;
                 return send_json_response(connection, json_resp, MHD_HTTP_OK);
             } else {
-                const char *json_err = "{\"error\":\"File upload failed\"}";
                 *upload_data_size = 0;
-                return send_json_response(connection, json_err, MHD_HTTP_BAD_REQUEST);
+                return send_json_response(connection, "{\"error\":\"File upload failed\"}", MHD_HTTP_BAD_REQUEST);
             }
         }
     }
