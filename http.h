@@ -1,6 +1,7 @@
-#ifdef HTTP_H
+#ifndef HTTP_H
 #define HTTP_H
 
-void handle_http_request(int client_sock)
+// HTTP 서버 실행 (libmicrohttpd 사용)
+int start_http_server();
 
-#endif //HTTP_H
+#endif // HTTP_H
