@@ -10,7 +10,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-#define POSTBUFFERSIZE  512
+#define POSTBUFFERSIZE 512
 
 // 간단한 세션 관리 구조체
 typedef struct Session {
@@ -21,6 +21,12 @@ typedef struct Session {
 } Session;
 
 static Session *session_list = NULL;
+
+// POST 데이터 처리를 위한 연결 정보 구조체
+typedef struct ConnectionInfo {
+    char *post_data;         // 누적 POST 데이터 (URL 인코딩된 데이터)
+    size_t post_data_size;   // 누적된 데이터 크기
+} ConnectionInfo;
 
 // 보안 개선: /dev/urandom을 이용한 토큰 생성
 static void generate_token(char *buf, size_t len) {
@@ -36,7 +42,7 @@ static void generate_token(char *buf, size_t len) {
             buf[i] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[rand() % 62];
         }
     }
-    buf[len-1] = '\0';
+    buf[len - 1] = '\0';
 }
 
 // 세션 생성 및 리스트에 추가
@@ -54,9 +60,9 @@ static Session* session_create(int user_id) {
 static Session* session_validate(const char *token) {
     Session *sess = session_list;
     time_t now = time(NULL);
-    while(sess) {
-        if(strcmp(sess->token, token) == 0) {
-            if(now - sess->last_active > SESSION_TIMEOUT)
+    while (sess) {
+        if (strcmp(sess->token, token) == 0) {
+            if (now - sess->last_active > SESSION_TIMEOUT)
                 return NULL;
             sess->last_active = now;
             return sess;
@@ -70,8 +76,8 @@ static Session* session_validate(const char *token) {
 static void session_cleanup() {
     Session **ptr = &session_list;
     time_t now = time(NULL);
-    while(*ptr) {
-        if(now - (*ptr)->last_active > SESSION_TIMEOUT) {
+    while (*ptr) {
+        if (now - (*ptr)->last_active > SESSION_TIMEOUT) {
             Session *tmp = *ptr;
             *ptr = (*ptr)->next;
             free(tmp);
@@ -88,7 +94,7 @@ static void add_security_headers(struct MHD_Response *response) {
     MHD_add_response_header(response, "Content-Security-Policy", "default-src 'self'");
 }
 
-// 공통 응답 전송 함수
+// 공통 응답 전송 함수 (Content-Type 헤더 추가)
 static int send_response(struct MHD_Connection *connection, const char *response_str, int status_code) {
     struct MHD_Response *response = MHD_create_response_from_buffer(strlen(response_str), (void*)response_str, MHD_RESPMEM_MUST_COPY);
     if (!response)
@@ -105,9 +111,9 @@ static int save_uploaded_file(const char *filename, const char *data, size_t siz
     mkdir(UPLOAD_DIR, 0755);
     snprintf(saved_path, path_len, "%s/%s", UPLOAD_DIR, filename);
     int fd = open(saved_path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
-    if(fd < 0)
+    if (fd < 0)
         return -1;
-    if(write(fd, data, size) != (ssize_t)size) {
+    if (write(fd, data, size) != (ssize_t)size) {
         close(fd);
         return -1;
     }
@@ -116,26 +122,37 @@ static int save_uploaded_file(const char *filename, const char *data, size_t siz
     return 0;
 }
 
-// URL별 처리 함수 선언
+// URL별 처리 함수 선언 (업로드 데이터 크기는 unsigned long* 사용)
 static int handle_root(struct MHD_Connection *connection, const char *method,
-                         const char *upload_data, size_t *upload_data_size, void **con_cls);
+                         const char *upload_data, unsigned long *upload_data_size, void **con_cls);
 static int handle_login(struct MHD_Connection *connection, const char *method,
-                          const char *upload_data, size_t *upload_data_size, void **con_cls);
+                          const char *upload_data, unsigned long *upload_data_size, void **con_cls);
 static int handle_upload(struct MHD_Connection *connection, const char *method,
-                           const char *upload_data, size_t *upload_data_size, void **con_cls);
+                           const char *upload_data, unsigned long *upload_data_size, void **con_cls);
 
 // HTTP 요청 처리 콜백 (멀티스레드 모드)
+// 주의: upload_data_size의 타입을 unsigned long*로 변경
 static int request_handler(void *cls, struct MHD_Connection *connection,
                            const char *url, const char *method,
                            const char *version, const char *upload_data,
-                           size_t *upload_data_size, void **con_cls)
+                           unsigned long *upload_data_size, void **con_cls)
 {
     session_cleanup();
-    if(strcmp(url, "/") == 0)
+    if (NULL == *con_cls) {
+        if (strcmp(method, "POST") == 0) {
+            ConnectionInfo *con_info = malloc(sizeof(ConnectionInfo));
+            con_info->post_data = NULL;
+            con_info->post_data_size = 0;
+            *con_cls = con_info;
+        } else {
+            *con_cls = NULL;
+        }
+    }
+    if (strcmp(url, "/") == 0)
         return handle_root(connection, method, upload_data, upload_data_size, con_cls);
-    else if(strcmp(url, "/login") == 0)
+    else if (strcmp(url, "/login") == 0)
         return handle_login(connection, method, upload_data, upload_data_size, con_cls);
-    else if(strcmp(url, "/upload") == 0)
+    else if (strcmp(url, "/upload") == 0)
         return handle_upload(connection, method, upload_data, upload_data_size, con_cls);
     else {
         return send_response(connection, "<html><body><h1>404 Not Found</h1></body></html>", MHD_HTTP_NOT_FOUND);
@@ -144,13 +161,9 @@ static int request_handler(void *cls, struct MHD_Connection *connection,
 
 // --- 루트 (블로그 목록, 글 등록) 처리 ---
 static int handle_root(struct MHD_Connection *connection, const char *method,
-                         const char *upload_data, size_t *upload_data_size, void **con_cls)
+                         const char *upload_data, unsigned long *upload_data_size, void **con_cls)
 {
-    static int dummy;
-    if (*con_cls == NULL) {
-        *con_cls = &dummy;
-        return MHD_YES;
-    }
+    // GET 요청 처리
     if (strcmp(method, "GET") == 0) {
         Post *posts = NULL;
         int count = 0;
@@ -194,13 +207,8 @@ static int handle_root(struct MHD_Connection *connection, const char *method,
 
 // --- 로그인 처리 ---
 static int handle_login(struct MHD_Connection *connection, const char *method,
-                          const char *upload_data, size_t *upload_data_size, void **con_cls)
+                          const char *upload_data, unsigned long *upload_data_size, void **con_cls)
 {
-    static int dummy;
-    if (*con_cls == NULL) {
-        *con_cls = &dummy;
-        return MHD_YES;
-    }
     if (strcmp(method, "GET") == 0) {
         const char *html =
             "<html><body><h1>Login</h1>"
@@ -219,9 +227,10 @@ static int handle_login(struct MHD_Connection *connection, const char *method,
                 Session *sess = session_create(user_id);
                 char cookie_hdr[128];
                 snprintf(cookie_hdr, sizeof(cookie_hdr), "SESSION=%s; Path=/; HttpOnly; Secure", sess->token);
-                struct MHD_Response *response = MHD_create_response_from_buffer(strlen("<html><body><h1>Login successful!</h1><a href='/'>Go to Blog</a></body></html>"),
-                                                                                 (void*)"<html><body><h1>Login successful!</h1><a href='/'>Go to Blog</a></body></html>",
-                                                                                 MHD_RESPMEM_MUST_COPY);
+                struct MHD_Response *response = MHD_create_response_from_buffer(
+                    strlen("<html><body><h1>Login successful!</h1><a href='/'>Go to Blog</a></body></html>"),
+                    (void*)"<html><body><h1>Login successful!</h1><a href='/'>Go to Blog</a></body></html>",
+                    MHD_RESPMEM_MUST_COPY);
                 MHD_add_response_header(response, "Set-Cookie", cookie_hdr);
                 add_security_headers(response);
                 int ret = MHD_queue_response(connection, MHD_HTTP_OK, response);
@@ -236,15 +245,10 @@ static int handle_login(struct MHD_Connection *connection, const char *method,
 
 // --- 파일 업로드 처리 ---
 static int handle_upload(struct MHD_Connection *connection, const char *method,
-                           const char *upload_data, size_t *upload_data_size, void **con_cls)
+                           const char *upload_data, unsigned long *upload_data_size, void **con_cls)
 {
-    static int dummy;
-    if (*con_cls == NULL) {
-        *con_cls = &dummy;
-        return MHD_YES;
-    }
     const char *cookie = MHD_lookup_connection_value(connection, MHD_COOKIE_KIND, "SESSION");
-    if(!cookie || !session_validate(cookie)) {
+    if (!cookie || !session_validate(cookie)) {
         return send_response(connection, "<html><body><h1>Unauthorized. Please login.</h1></body></html>", MHD_HTTP_FORBIDDEN);
     }
     if (strcmp(method, "GET") == 0) {
@@ -259,7 +263,7 @@ static int handle_upload(struct MHD_Connection *connection, const char *method,
         return send_response(connection, html, MHD_HTTP_OK);
     } else if (strcmp(method, "POST") == 0) {
         const char *data = MHD_lookup_connection_value(connection, MHD_POSTDATA_KIND, "image");
-        if(data) {
+        if (data) {
             char filename[256] = "uploaded_image.jpg"; // 실제 운영 시 파일명 추출 로직 필요
             char saved_path[512];
             if (save_uploaded_file(filename, data, strlen(data), saved_path, sizeof(saved_path)) == 0) {
@@ -288,7 +292,6 @@ int start_http_server() {
         return -1;
     }
     printf("HTTP server started on port %d\n", SERVER_PORT);
-    // 실제 운영에서는 signal handling 및 graceful shutdown 구현 필요
     getchar();
     MHD_stop_daemon(daemon);
     return 0;
