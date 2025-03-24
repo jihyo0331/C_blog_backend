@@ -26,6 +26,7 @@ static Session *session_list = NULL;
 typedef struct ConnectionInfo {
     char *post_data;         // 누적 POST 데이터 (JSON 형식)
     size_t post_data_size;   // 누적된 데이터 크기
+    struct MHD_PostProcessor *post_processor; // POST 데이터 처리를 위한 프로세서
 } ConnectionInfo;
 
 // 보안 개선: /dev/urandom을 이용한 토큰 생성
@@ -87,7 +88,7 @@ static void session_cleanup() {
     }
 }
 
-// JSON 응답 전송 함수 (Content-Type: application/json)
+// JSON 응답 전송 함수 (Content-Type: application/json 및 CORS 헤더 포함)
 static int send_json_response(struct MHD_Connection *connection, const char *json_str, int status_code) {
     struct MHD_Response *response = MHD_create_response_from_buffer(strlen(json_str), (void*)json_str, MHD_RESPMEM_MUST_COPY);
     if (!response)
@@ -115,6 +116,25 @@ static int save_uploaded_file(const char *filename, const char *data, size_t siz
     fsync(fd);
     close(fd);
     return 0;
+}
+
+// POST 프로세서 콜백: 전달된 데이터 청크를 누적
+static enum MHD_Result post_iterator(void *coninfo_cls, enum MHD_ValueKind kind,
+                                       const char *key, const char *filename,
+                                       const char *content_type, const char *transfer_encoding,
+                                       const char *data, uint64_t off, size_t size)
+{
+    ConnectionInfo *con_info = (ConnectionInfo*)coninfo_cls;
+    if (size > 0) {
+        char *new_ptr = realloc(con_info->post_data, con_info->post_data_size + size + 1);
+        if (new_ptr == NULL)
+            return MHD_NO;
+        con_info->post_data = new_ptr;
+        memcpy(con_info->post_data + con_info->post_data_size, data, size);
+        con_info->post_data_size += size;
+        con_info->post_data[con_info->post_data_size] = '\0';
+    }
+    return MHD_YES;
 }
 
 // URL별 처리 함수 선언 (upload_data_size 타입: unsigned long*)
@@ -147,14 +167,22 @@ static int request_handler(void *cls, struct MHD_Connection *connection,
     
     session_cleanup();
     if (NULL == *con_cls) {
+        ConnectionInfo *con_info = malloc(sizeof(ConnectionInfo));
+        if (con_info == NULL)
+            return MHD_NO;
+        con_info->post_data = NULL;
+        con_info->post_data_size = 0;
+        // POST 요청일 경우, post processor 생성
         if (strcmp(method, "POST") == 0) {
-            ConnectionInfo *con_info = malloc(sizeof(ConnectionInfo));
-            con_info->post_data = NULL;
-            con_info->post_data_size = 0;
-            *con_cls = con_info;
+            con_info->post_processor = MHD_create_post_processor(connection, POSTBUFFERSIZE, post_iterator, (void*)con_info);
+            if (con_info->post_processor == NULL) {
+                free(con_info);
+                return MHD_NO;
+            }
         } else {
-            *con_cls = NULL;
+            con_info->post_processor = NULL;
         }
+        *con_cls = con_info;
     }
     
     if (strcmp(url, "/posts") == 0)
@@ -195,26 +223,19 @@ static int handle_posts(struct MHD_Connection *connection, const char *method,
     } else if (strcmp(method, "POST") == 0) {
         ConnectionInfo *con_info = *con_cls;
         if (*upload_data_size != 0) {
-            char *new_ptr = realloc(con_info->post_data, con_info->post_data_size + *upload_data_size + 1);
-            if (new_ptr == NULL) {
-                fprintf(stderr, "Memory allocation error in posts handler\n");
-                free(con_info->post_data);
-                con_info->post_data = NULL;
-                con_info->post_data_size = 0;
-                return send_json_response(connection, "{\"error\":\"Server error\"}", MHD_HTTP_INTERNAL_SERVER_ERROR);
-            }
-            con_info->post_data = new_ptr;
-            memcpy(con_info->post_data + con_info->post_data_size, upload_data, *upload_data_size);
-            con_info->post_data_size += *upload_data_size;
-            con_info->post_data[con_info->post_data_size] = '\0';
+            MHD_post_process(con_info->post_processor, upload_data, *upload_data_size);
             *upload_data_size = 0;
             return MHD_YES;
         } else {
             char title[256] = {0}, content[1024] = {0};
-            sscanf(con_info->post_data, "{\"title\":\"%255[^\"]\",\"content\":\"%1023[^\"]\"}", title, content);
+            int parsed = sscanf(con_info->post_data, "{\"title\":\"%255[^\"]\",\"content\":\"%1023[^\"]\"}", title, content);
             free(con_info->post_data);
             con_info->post_data = NULL;
             con_info->post_data_size = 0;
+            if (parsed != 2) {
+                fprintf(stderr, "Failed to parse posts JSON\n");
+                return send_json_response(connection, "{\"error\":\"Invalid format\"}", MHD_HTTP_BAD_REQUEST);
+            }
             char date_str[64];
             time_t now = time(NULL);
             struct tm *tm_info = localtime(&now);
@@ -242,18 +263,7 @@ static int handle_login(struct MHD_Connection *connection, const char *method,
     } else if (strcmp(method, "POST") == 0) {
         ConnectionInfo *con_info = *con_cls;
         if (*upload_data_size != 0) {
-            char *new_ptr = realloc(con_info->post_data, con_info->post_data_size + *upload_data_size + 1);
-            if (new_ptr == NULL) {
-                fprintf(stderr, "Memory allocation error in login handler\n");
-                free(con_info->post_data);
-                con_info->post_data = NULL;
-                con_info->post_data_size = 0;
-                return send_json_response(connection, "{\"error\":\"Server error\"}", MHD_HTTP_INTERNAL_SERVER_ERROR);
-            }
-            con_info->post_data = new_ptr;
-            memcpy(con_info->post_data + con_info->post_data_size, upload_data, *upload_data_size);
-            con_info->post_data_size += *upload_data_size;
-            con_info->post_data[con_info->post_data_size] = '\0';
+            MHD_post_process(con_info->post_processor, upload_data, *upload_data_size);
             *upload_data_size = 0;
             return MHD_YES;
         } else {
@@ -302,6 +312,7 @@ static int handle_upload(struct MHD_Connection *connection, const char *method,
         return send_json_response(connection, json_msg, MHD_HTTP_OK);
     } else if (strcmp(method, "POST") == 0) {
         if (*upload_data_size != 0) {
+            // 파일 업로드의 경우 POST 데이터는 한 번에 온다고 가정
             char filename[256] = "uploaded_image.jpg"; // 파일명 추출 로직 필요
             char saved_path[512];
             if (save_uploaded_file(filename, upload_data, *upload_data_size, saved_path, sizeof(saved_path)) == 0) {
