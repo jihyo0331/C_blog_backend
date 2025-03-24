@@ -93,7 +93,6 @@ static int send_json_response(struct MHD_Connection *connection, const char *jso
     if (!response)
         return MHD_NO;
     MHD_add_response_header(response, "Content-Type", "application/json");
-    // 보안 헤더 추가 (원하는 경우)
     MHD_add_response_header(response, "X-Content-Type-Options", "nosniff");
     MHD_add_response_header(response, "X-Frame-Options", "DENY");
     int ret = MHD_queue_response(connection, status_code, response);
@@ -117,20 +116,34 @@ static int save_uploaded_file(const char *filename, const char *data, size_t siz
     return 0;
 }
 
-// URL별 처리 함수 선언 (upload_data_size의 타입은 unsigned long*)
+// URL별 처리 함수 선언 (upload_data_size 타입: unsigned long*)
 static int handle_posts(struct MHD_Connection *connection, const char *method,
                          const char *upload_data, unsigned long *upload_data_size, void **con_cls);
 static int handle_login(struct MHD_Connection *connection, const char *method,
-                          const char *upload_data, unsigned long *upload_data_size, void **con_cls);
+                         const char *upload_data, unsigned long *upload_data_size, void **con_cls);
 static int handle_upload(struct MHD_Connection *connection, const char *method,
-                           const char *upload_data, unsigned long *upload_data_size, void **con_cls);
+                          const char *upload_data, unsigned long *upload_data_size, void **con_cls);
 
 // HTTP 요청 처리 콜백 (멀티스레드 모드)
+// OPTIONS 요청에 대해 CORS Preflight 응답을 추가합니다.
 static int request_handler(void *cls, struct MHD_Connection *connection,
                            const char *url, const char *method,
                            const char *version, const char *upload_data,
                            unsigned long *upload_data_size, void **con_cls)
 {
+    // OPTIONS 요청 처리 (CORS Preflight)
+    if (strcmp(method, "OPTIONS") == 0) {
+        struct MHD_Response *response = MHD_create_response_from_buffer(0, "", MHD_RESPMEM_PERSISTENT);
+        if (!response)
+            return MHD_NO;
+        MHD_add_response_header(response, "Access-Control-Allow-Origin", "*");
+        MHD_add_response_header(response, "Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+        MHD_add_response_header(response, "Access-Control-Allow-Headers", "Content-Type");
+        int ret = MHD_queue_response(connection, MHD_HTTP_OK, response);
+        MHD_destroy_response(response);
+        return ret;
+    }
+    
     session_cleanup();
     if (NULL == *con_cls) {
         if (strcmp(method, "POST") == 0) {
@@ -142,6 +155,7 @@ static int request_handler(void *cls, struct MHD_Connection *connection,
             *con_cls = NULL;
         }
     }
+    
     if (strcmp(url, "/posts") == 0)
         return handle_posts(connection, method, upload_data, upload_data_size, con_cls);
     else if (strcmp(url, "/login") == 0)
@@ -180,7 +194,6 @@ static int handle_posts(struct MHD_Connection *connection, const char *method,
     } else if (strcmp(method, "POST") == 0) {
         ConnectionInfo *con_info = *con_cls;
         if (*upload_data_size != 0) {
-            // 누적 POST 데이터를 저장
             con_info->post_data = realloc(con_info->post_data, con_info->post_data_size + *upload_data_size + 1);
             memcpy(con_info->post_data + con_info->post_data_size, upload_data, *upload_data_size);
             con_info->post_data_size += *upload_data_size;
@@ -188,9 +201,8 @@ static int handle_posts(struct MHD_Connection *connection, const char *method,
             *upload_data_size = 0;
             return MHD_YES;
         } else {
-            // 간단한 JSON 파싱: {"title":"...","content":"..."}
             char title[256] = {0}, content[1024] = {0};
-            // 형식이 고정되어 있다고 가정 (실제 환경에서는 robust JSON 파서를 사용)
+            // 간단한 JSON 파싱; 실제 운영에서는 JSON 라이브러리 사용 권장
             sscanf(con_info->post_data, "{\"title\":\"%255[^\"]\",\"content\":\"%1023[^\"]\"}", title, content);
             free(con_info->post_data);
             con_info->post_data = NULL;
@@ -211,10 +223,10 @@ static int handle_posts(struct MHD_Connection *connection, const char *method,
 }
 
 // --- 로그인 처리 ---
-// GET: 단순 JSON 메시지 (외부 클라이언트는 POST 방식 사용 권장)
-// POST: JSON 요청 {"username":"...", "password":"..."}를 파싱하여 로그인 처리 후 세션 토큰 반환
+// GET: 단순 JSON 메시지 안내
+// POST: JSON 요청 {"username":"...","password":"..."}를 파싱하여 로그인 처리 후 세션 토큰 반환
 static int handle_login(struct MHD_Connection *connection, const char *method,
-                          const char *upload_data, unsigned long *upload_data_size, void **con_cls)
+                         const char *upload_data, unsigned long *upload_data_size, void **con_cls)
 {
     if (strcmp(method, "GET") == 0) {
         const char *json_msg = "{\"message\":\"Please use POST to login\"}";
@@ -252,9 +264,9 @@ static int handle_login(struct MHD_Connection *connection, const char *method,
 
 // --- 파일 업로드 처리 ---
 // GET: JSON 메시지 안내
-// POST: 파일 업로드는 단순화하여, 업로드된 데이터 전체를 파일로 저장 후 JSON 결과 반환
+// POST: 단순하게 POST 데이터 전체를 파일 내용으로 저장하고, JSON 결과 반환
 static int handle_upload(struct MHD_Connection *connection, const char *method,
-                           const char *upload_data, unsigned long *upload_data_size, void **con_cls)
+                          const char *upload_data, unsigned long *upload_data_size, void **con_cls)
 {
     const char *cookie = MHD_lookup_connection_value(connection, MHD_COOKIE_KIND, "SESSION");
     if (!cookie || !session_validate(cookie)) {
@@ -265,10 +277,8 @@ static int handle_upload(struct MHD_Connection *connection, const char *method,
         const char *json_msg = "{\"message\":\"Use POST to upload file\"}";
         return send_json_response(connection, json_msg, MHD_HTTP_OK);
     } else if (strcmp(method, "POST") == 0) {
-        // 단순화를 위해 파일 업로드는 POST 데이터 전체를 파일 내용으로 저장
-        // 실제 운영에서는 multipart/form-data 처리가 필요합니다.
         if (*upload_data_size != 0) {
-            char filename[256] = "uploaded_image.jpg"; // 클라이언트에서 별도 파일명 전달하지 않는 경우
+            char filename[256] = "uploaded_image.jpg"; // 파일명 추출 로직 필요
             char saved_path[512];
             if (save_uploaded_file(filename, upload_data, *upload_data_size, saved_path, sizeof(saved_path)) == 0) {
                 char json_resp[256];
@@ -299,7 +309,7 @@ int start_http_server() {
         return -1;
     }
     printf("HTTP server started on port %d\n", SERVER_PORT);
-    getchar();
+    getchar();  // 서버 종료 전까지 대기
     MHD_stop_daemon(daemon);
     return 0;
 }
