@@ -45,3 +45,6 @@ db.c:92:13: warning: ‘strncpy’ output may be truncated copying 63 bytes from
    92 |             strncpy(list[cnt].date, date, sizeof(list[cnt].date)-1);
       |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 gcc -Wall -O2 -D_GNU_SOURCE -o main main.o http.o db.o -lmicrohttpd -lcrypt
+jihyo@raspberrypi:~/Documents/c_bacend $ ./main
+HTTP server started on port 8080
+No POST data received in login handler
