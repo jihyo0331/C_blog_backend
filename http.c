@@ -93,6 +93,7 @@ static int send_response(struct MHD_Connection *connection, const char *response
     struct MHD_Response *response = MHD_create_response_from_buffer(strlen(response_str), (void*)response_str, MHD_RESPMEM_MUST_COPY);
     if (!response)
         return MHD_NO;
+    MHD_add_response_header(response, "Content-Type", "text/html");
     add_security_headers(response);
     int ret = MHD_queue_response(connection, status_code, response);
     MHD_destroy_response(response);

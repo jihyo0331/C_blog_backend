@@ -9,7 +9,7 @@ int main(void) {
         fprintf(stderr, "Database initialization failed.\n");
         return EXIT_FAILURE;
     }
-    // 최초 실행 시 기본 사용자 생성 (예: admin / password)
+    // (예: admin / password)
     // db_create_user("admin", "password");
 
     if(start_http_server() != 0) {
