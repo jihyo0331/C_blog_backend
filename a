@@ -1,3 +1,47 @@
-jihyo@raspberrypi:~/Documents/c_bacend $ git pull --rebase origin main
-error: cannot pull with rebase: Your index contains uncommitted changes.
-error: please commit or stash them.
+jihyo@raspberrypi:~/Documents/c_bacend $ make
+gcc -Wall -O2 -D_GNU_SOURCE -c main.c -o main.o
+gcc -Wall -O2 -D_GNU_SOURCE -c http.c -o http.o
+http.c: In function ‘start_http_server’:
+http.c:332:31: warning: passing argument 5 of ‘MHD_start_daemon’ from incompatible pointer type [-Wincompatible-pointer-types]
+  332 |                               &request_handler, NULL,
+      |                               ^~~~~~~~~~~~~~~~
+      |                               |
+      |                               int (*)(void *, struct MHD_Connection *, const char *, const char *, const char *, const char *, long unsigned int *, void **)
+In file included from http.c:4:
+/usr/include/microhttpd.h:2701:45: note: expected ‘MHD_AccessHandlerCallback’ {aka ‘enum MHD_Result (*)(void *, struct MHD_Connection *, const char *, const char *, const char *, const char *, long unsigned int *, void **)’} but argument is of type ‘int (*)(void *, struct MHD_Connection *, const char *, const char *, const char *, const char *, long unsigned int *, void **)’
+ 2701 |                   MHD_AccessHandlerCallback dh, void *dh_cls,
+      |                   ~~~~~~~~~~~~~~~~~~~~~~~~~~^~
+http.c: In function ‘handle_posts’:
+http.c:190:65: warning: ‘%s’ directive output may be truncated writing up to 1023 bytes into a region of size between 729 and 994 [-Wformat-truncation=]
+  190 |                      "{\"id\":%d,\"title\":\"%s\",\"content\":\"%s\",\"date\":\"%s\"}%s",
+      |                                                                 ^~
+http.c:189:13: note: ‘snprintf’ output between 43 and 1395 bytes into a destination of size 1024
+  189 |             snprintf(post_json, sizeof(post_json),
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  190 |                      "{\"id\":%d,\"title\":\"%s\",\"content\":\"%s\",\"date\":\"%s\"}%s",
+      |                      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  191 |                      posts[i].id, posts[i].title, posts[i].content, posts[i].date,
+      |                      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  192 |                      (i < count - 1) ? "," : "");
+      |                      ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+http.c: In function ‘handle_upload.constprop’:
+http.c:313:68: warning: ‘%s’ directive output may be truncated writing up to 511 bytes into a region of size 222 [-Wformat-truncation=]
+  313 |                          "{\"result\":\"File uploaded\",\"path\":\"%s\"}", saved_path);
+      |                                                                    ^~      ~~~~~~~~~~
+http.c:312:17: note: ‘snprintf’ output between 37 and 548 bytes into a destination of size 256
+  312 |                 snprintf(json_resp, sizeof(json_resp),
+      |                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  313 |                          "{\"result\":\"File uploaded\",\"path\":\"%s\"}", saved_path);
+      |                          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+gcc -Wall -O2 -D_GNU_SOURCE -c db.c -o db.o
+db.c: In function ‘db_get_posts’:
+db.c:90:13: warning: ‘strncpy’ output may be truncated copying 255 bytes from a string of length 255 [-Wstringop-truncation]
+   90 |             strncpy(list[cnt].title, title, sizeof(list[cnt].title)-1);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+db.c:91:13: warning: ‘strncpy’ output may be truncated copying 1023 bytes from a string of length 1023 [-Wstringop-truncation]
+   91 |             strncpy(list[cnt].content, content, sizeof(list[cnt].content)-1);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+db.c:92:13: warning: ‘strncpy’ output may be truncated copying 63 bytes from a string of length 63 [-Wstringop-truncation]
+   92 |             strncpy(list[cnt].date, date, sizeof(list[cnt].date)-1);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+gcc -Wall -O2 -D_GNU_SOURCE -o main main.o http.o db.o -lmicrohttpd -lcrypt
